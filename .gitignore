@@ -12,3 +12,6 @@ build/
 _drive_credentials.json
 _drive_token.json
 .DS_Store
+extension/node_modules/
+extension/out/
+extension/*.vsix

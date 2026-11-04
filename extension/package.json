@@ -1,0 +1,75 @@
+{
+  "name": "doc-hub-library",
+  "displayName": "Doc Hub Library",
+  "description": "Browse your task documentation library from the sidebar",
+  "version": "0.1.0",
+  "publisher": "blizzardpurple",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": ["onView:docHubLibrary"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "doc-hub",
+          "title": "Doc Hub",
+          "icon": "icons/doc-hub.svg"
+        }
+      ]
+    },
+    "views": {
+      "doc-hub": [
+        {
+          "id": "docHubLibrary",
+          "name": "Tasks",
+          "type": "tree"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "docHub.refresh",
+        "title": "Refresh",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "docHub.openFile",
+        "title": "Open File"
+      },
+      {
+        "command": "docHub.revealInFinder",
+        "title": "Reveal in Finder",
+        "icon": "$(folder-opened)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "docHub.refresh",
+          "when": "view == docHubLibrary",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "docHub.revealInFinder",
+          "when": "view == docHubLibrary"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "npx @vscode/vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.3.0",
+    "@vscode/vsce": "^3.0.0"
+  }
+}
