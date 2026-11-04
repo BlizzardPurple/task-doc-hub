@@ -13,14 +13,23 @@ manager = TaskManager(DOC_ROOT)
 
 @mcp.tool()
 def create_task(
-    jira_key: str | None = None, title_slug: str | None = None
+    jira_key: str | None = None,
+    title_slug: str | None = None,
+    description: str | None = None,
+    keywords: list[str] | None = None,
 ) -> dict:
     """Create a new task folder with a standardized template.
 
     Provide a jira_key (e.g. N1AREF-3027) or a title_slug (e.g. edit-flow-e2).
+    Optionally add a description and keywords for better searchability.
     Creates index.md + designs/, screenshots/, specs/ subfolders.
     """
-    return manager.create_task(jira_key=jira_key, title_slug=title_slug).model_dump()
+    return manager.create_task(
+        jira_key=jira_key,
+        title_slug=title_slug,
+        description=description,
+        keywords=keywords,
+    ).model_dump()
 
 
 @mcp.tool()
@@ -30,7 +39,7 @@ def get_context(
     """Load task context by ID, or auto-detect from the current git branch.
 
     If no task_id is given, reads the git branch in cwd and extracts a JIRA key.
-    Returns metadata, notes, and file listing for the matched task.
+    Returns metadata, context entries from all sessions, notes, and file listing.
     """
     return manager.get_context(task_id=task_id, cwd=cwd).model_dump()
 
@@ -53,6 +62,22 @@ def add_note(task_id: str, content: str) -> dict:
 
 
 @mcp.tool()
+def add_context(task_id: str, label: str, content: str) -> dict:
+    """Append session context to a task's shared documentation.
+
+    Use this to share what was done in one Kiro session (e.g. FE work) so that
+    another session (e.g. BE work) can see it. Each context block is labeled
+    (FE, BE, Design, QA, etc.) and timestamped.
+
+    Example: add_context("N1AREF-3027", "FE", "Implemented edit form with
+    React Query caching, added validation for BEID field")
+    """
+    return manager.add_context(
+        task_id=task_id, label=label, content=content
+    ).model_dump()
+
+
+@mcp.tool()
 def add_screenshot(task_id: str, file_path: str) -> dict:
     """Store a screenshot in a task's screenshots/ folder.
 
@@ -64,16 +89,19 @@ def add_screenshot(task_id: str, file_path: str) -> dict:
 
 @mcp.tool()
 def search_tasks(query: str) -> dict:
-    """Search across all task documentation (case-insensitive).
+    """Search across all task documentation using word-tokenized matching.
 
-    Returns matching task IDs with text snippets containing the query.
+    You don't need to remember exact JIRA keys. Describe what you're looking for
+    in plain words — e.g. "BEID API external users" or "edit flow caching".
+    Searches across titles, descriptions, keywords, context, and notes.
+    Results are ranked by relevance (how many query words match).
     """
     return manager.search_tasks(query=query).model_dump()
 
 
 @mcp.tool()
 def list_tasks() -> dict:
-    """List all tracked tasks with their title and status."""
+    """List all tracked tasks with their title, description, and status."""
     return manager.list_tasks().model_dump()
 
 

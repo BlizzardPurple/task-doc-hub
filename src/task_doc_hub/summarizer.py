@@ -12,12 +12,7 @@ SUMMARY_FILENAME = "SUMMARY.md"
 
 
 def generate_summary(doc_root: Path, output_path: Path | None = None) -> ToolResponse:
-    """Generate a comprehensive summary of all tasks into a single markdown file.
-
-    The summary is written to output_path (defaults to doc_root/SUMMARY.md)
-    and is designed to be shared — dropped into a Drive folder, attached to
-    a Slack thread, or pasted into a wiki.
-    """
+    """Generate a comprehensive summary of all tasks into a single markdown file."""
     dest = output_path or (doc_root / SUMMARY_FILENAME)
     tasks = _collect_all_tasks(doc_root)
 
@@ -30,8 +25,8 @@ def generate_summary(doc_root: Path, output_path: Path | None = None) -> ToolRes
 
     lines: list[str] = []
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    lines.append(f"# Task Documentation Summary")
-    lines.append(f"")
+    lines.append("# Task Documentation Summary")
+    lines.append("")
     lines.append(f"Generated: {now}")
     lines.append(f"Total tasks: {len(tasks)}")
     lines.append("")
@@ -72,7 +67,11 @@ def generate_summary(doc_root: Path, output_path: Path | None = None) -> ToolRes
             lines.append(f"**JIRA:** {t['jira_key']}")
         if t["title"]:
             lines.append(f"**Title:** {t['title']}")
+        if t["description"]:
+            lines.append(f"**Description:** {t['description']}")
         lines.append(f"**Status:** {t['status']}")
+        if t["keywords"]:
+            lines.append(f"**Keywords:** {', '.join(t['keywords'])}")
         if t["links"]:
             lines.append(f"**Links:** {', '.join(t['links'])}")
         lines.append("")
@@ -83,6 +82,16 @@ def generate_summary(doc_root: Path, output_path: Path | None = None) -> ToolRes
             for f in t["files"]:
                 lines.append(f"- `{f}`")
             lines.append("")
+
+        # Context entries (cross-session)
+        if t["context"]:
+            lines.append("**Session Context:**")
+            lines.append("")
+            for ctx in t["context"]:
+                lines.append(f"#### [{ctx['label']}] {ctx['timestamp']}")
+                lines.append("")
+                lines.append(ctx["content"])
+                lines.append("")
 
         # Recent notes (last 5)
         if t["notes"]:
@@ -111,18 +120,21 @@ def generate_summary(doc_root: Path, output_path: Path | None = None) -> ToolRes
 
 
 def _collect_all_tasks(doc_root: Path) -> list[dict]:
-    """Gather metadata, notes, and file listings from all task folders."""
+    """Gather metadata, context, notes, and file listings from all task folders."""
     tasks: list[dict] = []
     for child in sorted(doc_root.iterdir()):
         if not child.is_dir() or child.name.startswith("_"):
             continue
         idx_path = child / "index.md"
-        meta_dict = {
+        meta_dict: dict = {
             "folder": child.name,
             "jira_key": None,
             "title": None,
+            "description": None,
+            "keywords": [],
             "status": "unknown",
             "links": [],
+            "context": [],
             "notes": [],
             "files": [],
             "file_count": 0,
@@ -130,11 +142,14 @@ def _collect_all_tasks(doc_root: Path) -> list[dict]:
 
         if idx_path.exists():
             try:
-                meta, notes = index_file.read_index(idx_path)
+                meta, ctx_entries, notes = index_file.read_index(idx_path)
                 meta_dict["jira_key"] = meta.jira_key
                 meta_dict["title"] = meta.title
+                meta_dict["description"] = meta.description
+                meta_dict["keywords"] = meta.keywords
                 meta_dict["status"] = meta.status
                 meta_dict["links"] = meta.links
+                meta_dict["context"] = [c.model_dump() for c in ctx_entries]
                 meta_dict["notes"] = [n.model_dump() for n in notes]
             except ValueError:
                 meta_dict["status"] = "corrupt-index"

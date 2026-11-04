@@ -43,6 +43,8 @@ class TaskManager:
         self,
         jira_key: str | None = None,
         title_slug: str | None = None,
+        description: str | None = None,
+        keywords: list[str] | None = None,
     ) -> ToolResponse:
         folder_name = self._derive_folder_name(jira_key, title_slug)
         if folder_name is None:
@@ -63,7 +65,12 @@ class TaskManager:
             sub_path = folder / sub
             sub_path.mkdir()
             (sub_path / ".gitkeep").touch()
-        metadata = TaskMetadata(jira_key=jira_key, title=title_slug or jira_key)
+        metadata = TaskMetadata(
+            jira_key=jira_key,
+            title=title_slug or jira_key,
+            description=description,
+            keywords=keywords or [],
+        )
         index_file.create_index(folder / "index.md", metadata)
         return ToolResponse(
             success=True,
@@ -119,6 +126,28 @@ class TaskManager:
             data={"timestamp": entry.timestamp},
         )
 
+    def add_context(
+        self, task_id: str, label: str, content: str
+    ) -> ToolResponse:
+        """Append a labeled context block from a session (FE, BE, etc.)."""
+        folder = self._resolve_task_folder(task_id)
+        if not folder:
+            return ToolResponse(
+                success=False,
+                message=f"Task '{task_id}' not found.",
+                error_code=ErrorCode.TASK_NOT_FOUND,
+            )
+        idx_path = folder / "index.md"
+        entry = index_file.append_context(idx_path, label, content)
+        return ToolResponse(
+            success=True,
+            message=f"Context added from [{entry.label}] at {entry.timestamp}.",
+            data={
+                "timestamp": entry.timestamp,
+                "label": entry.label,
+            },
+        )
+
     def add_screenshot(self, task_id: str, source_path: str) -> ToolResponse:
         folder = self._resolve_task_folder(task_id)
         if not folder:
@@ -142,21 +171,64 @@ class TaskManager:
         )
 
     def search_tasks(self, query: str) -> ToolResponse:
+        """Word-tokenized search across all task metadata, context, and notes.
+
+        Splits the query into words and scores each task by how many words match.
+        This means "BEID API external users" will match a task whose description
+        contains those words even if they're not contiguous.
+        """
         self._ensure_doc_root()
+        query_words = [w.lower() for w in query.split() if len(w) >= 2]
+        if not query_words:
+            return ToolResponse(
+                success=True,
+                message="Query too short.",
+                data={"results": []},
+            )
+
         hits: list[dict] = []
-        query_lower = query.lower()
         for idx_path in self.doc_root.glob("*/index.md"):
             try:
                 text = idx_path.read_text(encoding="utf-8")
             except OSError:
                 continue
-            if query_lower in text.lower():
-                snippets = _extract_snippets(text, query_lower)
-                hits.append(
-                    SearchHit(
-                        task_id=idx_path.parent.name, snippets=snippets
-                    ).model_dump()
-                )
+            text_lower = text.lower()
+
+            # Score: fraction of query words found in this task
+            matched_words = [w for w in query_words if w in text_lower]
+            if not matched_words:
+                continue
+
+            relevance = len(matched_words) / len(query_words)
+
+            # Extract snippets around the matched words
+            snippets: list[str] = []
+            for word in matched_words[:3]:  # limit snippet extraction
+                snippets.extend(_extract_snippets(text, word, context_chars=60))
+
+            # Also pull title/description from frontmatter for display
+            title = None
+            description = None
+            try:
+                meta, _, _ = index_file.read_index(idx_path)
+                title = meta.title
+                description = meta.description
+            except (ValueError, Exception):
+                pass
+
+            hits.append(
+                SearchHit(
+                    task_id=idx_path.parent.name,
+                    title=title,
+                    description=description,
+                    relevance=relevance,
+                    snippets=snippets[:5],
+                ).model_dump()
+            )
+
+        # Sort by relevance descending
+        hits.sort(key=lambda h: h["relevance"], reverse=True)
+
         if not hits:
             return ToolResponse(
                 success=True,
@@ -177,17 +249,22 @@ class TaskManager:
                 continue
             idx_path = child / "index.md"
             title = None
+            description = None
             status = "unknown"
             if idx_path.exists():
                 try:
-                    meta, _ = index_file.read_index(idx_path)
+                    meta, _, _ = index_file.read_index(idx_path)
                     title = meta.title
+                    description = meta.description
                     status = meta.status
                 except ValueError:
                     logger.warning("Corrupt index in %s", child.name)
             summaries.append(
                 TaskSummary(
-                    folder_name=child.name, title=title, status=status
+                    folder_name=child.name,
+                    title=title,
+                    description=description,
+                    status=status,
                 ).model_dump()
             )
         if not summaries:
@@ -244,7 +321,7 @@ class TaskManager:
                 error_code=ErrorCode.INDEX_CORRUPT,
             )
         try:
-            meta, notes = index_file.read_index(idx_path)
+            meta, ctx_entries, notes = index_file.read_index(idx_path)
         except ValueError:
             files = [
                 str(p.relative_to(folder))
@@ -266,6 +343,7 @@ class TaskManager:
             folder_name=task_id,
             metadata=meta,
             notes=notes,
+            context_entries=ctx_entries,
             files=files,
         )
         return ToolResponse(
