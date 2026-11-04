@@ -86,7 +86,6 @@ class TaskManager:
         self._ensure_doc_root()
         if task_id:
             return self._load_context(task_id)
-        # Auto-detect from git branch
         branch = git_detector.get_current_branch(cwd)
         if not branch:
             return ToolResponse(
@@ -170,11 +169,20 @@ class TaskManager:
             data={"filename": stored_name},
         )
 
-
-    def save_recent_screenshots(
-        self, task_id: str, count: int = 4
+    def save_recent_captures(
+        self,
+        task_id: str,
+        count: int = 4,
+        media_type: str = "all",
+        force: bool = False,
     ) -> ToolResponse:
-        """Copy the latest N screenshots from ~/Documents/Screenshots into the task."""
+        """Copy the latest N captures (screenshots + recordings) into a task.
+
+        Checks for time gaps >= 30 min between consecutive captures.
+        If a gap is found and force=False, returns the listing with timestamps
+        and gap details so Kiro can reprompt the user to confirm.
+        Set force=True to skip gap detection and save anyway.
+        """
         folder = self._resolve_task_folder(task_id)
         if not folder:
             return ToolResponse(
@@ -182,26 +190,44 @@ class TaskManager:
                 message=f"Task '{task_id}' not found.",
                 error_code=ErrorCode.TASK_NOT_FOUND,
             )
-        stored = screenshot.save_recent_screenshots(folder, count)
-        if not stored:
+
+        captures = screenshot.get_recent_captures(count, media_type=media_type)
+        if not captures:
             return ToolResponse(
                 success=False,
-                message="No screenshots found in ~/Documents/Screenshots.",
-                error_code=ErrorCode.NO_SCREENSHOTS_FOUND,
+                message=f"No captures found in ~/Documents/Screenshots.",
+                error_code=ErrorCode.NO_CAPTURES_FOUND,
             )
+
+        # Time gap detection
+        if not force:
+            gaps = screenshot.detect_time_gaps(captures)
+            if gaps:
+                listing = screenshot.build_capture_listing(captures)
+                return ToolResponse(
+                    success=False,
+                    message=(
+                        f"Found {len(gaps)} time gap(s) >= 30 minutes between "
+                        f"consecutive captures. Review the timestamps below and "
+                        f"confirm which ones to save, or call again with force=True."
+                    ),
+                    data={
+                        "captures": listing,
+                        "gaps": gaps,
+                        "task_id": task_id,
+                    },
+                    error_code=ErrorCode.TIME_GAP_DETECTED,
+                )
+
+        stored = screenshot.save_captures(folder, captures)
         return ToolResponse(
             success=True,
-            message=f"Saved {len(stored)} screenshot(s).",
+            message=f"Saved {len(stored)} capture(s) ({media_type}).",
             data={"filenames": stored, "count": len(stored)},
         )
 
     def search_tasks(self, query: str) -> ToolResponse:
-        """Word-tokenized search across all task metadata, context, and notes.
-
-        Splits the query into words and scores each task by how many words match.
-        This means "BEID API external users" will match a task whose description
-        contains those words even if they're not contiguous.
-        """
+        """Word-tokenized search across all task metadata, context, and notes."""
         self._ensure_doc_root()
         query_words = [w.lower() for w in query.split() if len(w) >= 2]
         if not query_words:
@@ -219,19 +245,15 @@ class TaskManager:
                 continue
             text_lower = text.lower()
 
-            # Score: fraction of query words found in this task
             matched_words = [w for w in query_words if w in text_lower]
             if not matched_words:
                 continue
 
             relevance = len(matched_words) / len(query_words)
-
-            # Extract snippets around the matched words
             snippets: list[str] = []
-            for word in matched_words[:3]:  # limit snippet extraction
+            for word in matched_words[:3]:
                 snippets.extend(_extract_snippets(text, word, context_chars=60))
 
-            # Also pull title/description from frontmatter for display
             title = None
             description = None
             try:
@@ -251,7 +273,6 @@ class TaskManager:
                 ).model_dump()
             )
 
-        # Sort by relevance descending
         hits.sort(key=lambda h: h["relevance"], reverse=True)
 
         if not hits:

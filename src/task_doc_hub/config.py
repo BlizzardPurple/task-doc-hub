@@ -14,8 +14,14 @@ JIRA_KEY_PATTERN = r"([A-Z][A-Z0-9]+-\d+)"
 # Valid title slug: lowercase alphanumeric + hyphens
 TITLE_SLUG_PATTERN = r"^[a-z0-9]+(-[a-z0-9]+)*$"
 
-# Image extensions recognized as screenshots
-SCREENSHOT_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".tiff"}
+# Media extensions
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".tiff"}
+VIDEO_EXTENSIONS = {".mov", ".mp4", ".webm", ".mkv", ".avi"}
+CAPTURE_EXTENSIONS = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS
+
+# Time gap threshold (seconds) — if two consecutive captures are
+# more than this apart, flag it for the user to confirm
+TIME_GAP_THRESHOLD = 30 * 60  # 30 minutes
 
 
 class ErrorCode:
@@ -30,4 +36,5 @@ class ErrorCode:
     DOC_ROOT_ERROR = "DOC_ROOT_ERROR"
     INDEX_CORRUPT = "INDEX_CORRUPT"
     INVALID_INPUT = "INVALID_INPUT"
-    NO_SCREENSHOTS_FOUND = "NO_SCREENSHOTS_FOUND"
+    NO_CAPTURES_FOUND = "NO_CAPTURES_FOUND"
+    TIME_GAP_DETECTED = "TIME_GAP_DETECTED"

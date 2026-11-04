@@ -1,4 +1,4 @@
-"""FastMCP server entry point — registers all tools."""
+"""MCP server entry point — registers all Doc Hub tools."""
 
 from __future__ import annotations
 
@@ -88,26 +88,45 @@ def add_context(task_id: str, label: str, content: str) -> dict:
 
 @mcp.tool()
 def add_screenshot(task_id: str, file_path: str) -> dict:
-    """Store a screenshot in a task's screenshots/ folder.
+    """Store a specific screenshot or recording in a task's screenshots/ folder.
 
-    Copies the file at file_path into the task folder. Deduplicates filenames
-    automatically if a file with the same name already exists.
+    Use this when you have a specific file path. For grabbing recent captures
+    automatically, use save_recent_captures instead.
     """
     return manager.add_screenshot(task_id=task_id, source_path=file_path).model_dump()
 
 
-
 @mcp.tool()
-def save_recent_screenshots(task_id: str, count: int = 4) -> dict:
-    """Save the latest screenshots into a task's screenshots/ folder.
+def save_recent_captures(
+    task_id: str,
+    count: int = 4,
+    media_type: str = "all",
+    force: bool = False,
+) -> dict:
+    """Save the latest screenshots and/or screen recordings into a task.
 
-    Grabs the most recent `count` screenshots from ~/Documents/Screenshots
-    (sorted by modification time, newest first) and copies them into the task.
-    Only image files (png, jpg, gif, webp, tiff) are included.
+    Grabs the most recent `count` captures from ~/Documents/Screenshots
+    sorted by time (newest first). Includes both screenshots and recordings.
 
-    Example: "save the last 4 screenshots for N1AREF-3027"
+    Args:
+        task_id: The task to save captures into.
+        count: How many captures to grab (default 4).
+        media_type: "all" (screenshots + recordings), "image" only, or "video" only.
+        force: Skip time gap detection and save immediately.
+
+    Time gap detection: If any two consecutive captures are >= 30 minutes apart,
+    returns the full listing with timestamps and gap details instead of saving.
+    This lets you review and confirm which ones belong to your current session.
+    Call again with force=True to save anyway.
+
+    Examples:
+        "save last 4 screenshots for N1AREF-3027"
+        "save last 3 screenshots and 1 recording for 3027"
+        "grab the latest screen recording for edit-flow-e2"
     """
-    return manager.save_recent_screenshots(task_id=task_id, count=count).model_dump()
+    return manager.save_recent_captures(
+        task_id=task_id, count=count, media_type=media_type, force=force
+    ).model_dump()
 
 
 @mcp.tool()
