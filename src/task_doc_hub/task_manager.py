@@ -170,6 +170,31 @@ class TaskManager:
             data={"filename": stored_name},
         )
 
+
+    def save_recent_screenshots(
+        self, task_id: str, count: int = 4
+    ) -> ToolResponse:
+        """Copy the latest N screenshots from ~/Documents/Screenshots into the task."""
+        folder = self._resolve_task_folder(task_id)
+        if not folder:
+            return ToolResponse(
+                success=False,
+                message=f"Task '{task_id}' not found.",
+                error_code=ErrorCode.TASK_NOT_FOUND,
+            )
+        stored = screenshot.save_recent_screenshots(folder, count)
+        if not stored:
+            return ToolResponse(
+                success=False,
+                message="No screenshots found in ~/Documents/Screenshots.",
+                error_code=ErrorCode.NO_SCREENSHOTS_FOUND,
+            )
+        return ToolResponse(
+            success=True,
+            message=f"Saved {len(stored)} screenshot(s).",
+            data={"filenames": stored, "count": len(stored)},
+        )
+
     def search_tasks(self, query: str) -> ToolResponse:
         """Word-tokenized search across all task metadata, context, and notes.
 

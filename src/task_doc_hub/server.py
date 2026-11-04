@@ -96,6 +96,20 @@ def add_screenshot(task_id: str, file_path: str) -> dict:
     return manager.add_screenshot(task_id=task_id, source_path=file_path).model_dump()
 
 
+
+@mcp.tool()
+def save_recent_screenshots(task_id: str, count: int = 4) -> dict:
+    """Save the latest screenshots into a task's screenshots/ folder.
+
+    Grabs the most recent `count` screenshots from ~/Documents/Screenshots
+    (sorted by modification time, newest first) and copies them into the task.
+    Only image files (png, jpg, gif, webp, tiff) are included.
+
+    Example: "save the last 4 screenshots for N1AREF-3027"
+    """
+    return manager.save_recent_screenshots(task_id=task_id, count=count).model_dump()
+
+
 @mcp.tool()
 def search_tasks(query: str) -> dict:
     """Search across all task documentation using word-tokenized matching.
