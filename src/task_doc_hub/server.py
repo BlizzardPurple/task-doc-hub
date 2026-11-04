@@ -2,12 +2,21 @@
 
 from __future__ import annotations
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 from task_doc_hub.config import DOC_ROOT
 from task_doc_hub.task_manager import TaskManager
 
-mcp = FastMCP("task-doc-hub")
+mcp = MCPServer(
+    "doc-hub",
+    instructions=(
+        "Doc Hub — persistent task documentation manager. "
+        "Also known as: doc hub, task doc hub, task docs. "
+        "Use these tools when the user wants to create tasks, add notes, "
+        "add session context, search past work, list tasks, generate summaries, "
+        "store screenshots, or sync docs to Google Drive."
+    ),
+)
 manager = TaskManager(DOC_ROOT)
 
 
