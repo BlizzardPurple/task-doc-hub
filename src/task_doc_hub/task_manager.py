@@ -34,8 +34,41 @@ class TaskManager:
             logger.warning("Doc root created: %s", self.doc_root)
 
     def _resolve_task_folder(self, task_id: str) -> Path | None:
+        """Resolve a task folder by exact name, partial JIRA number, or substring.
+
+        Matching order:
+        1. Exact match (e.g. "N1AREF-3018")
+        2. JIRA number suffix (e.g. "3018" matches "N1AREF-3018")
+        3. Substring/contains (e.g. "edit-flow" matches "edit-flow-e2")
+        """
+        # 1. Exact match
         folder = self.doc_root / task_id
-        return folder if folder.is_dir() else None
+        if folder.is_dir():
+            return folder
+
+        if not self.doc_root.is_dir():
+            return None
+
+        # 2. JIRA number suffix — "3018" matches "N1AREF-3018", "PROJ-3018"
+        suffix_pattern = f"-{task_id}"
+        candidates = [
+            d for d in self.doc_root.iterdir()
+            if d.is_dir() and not d.name.startswith("_")
+            and d.name.endswith(suffix_pattern)
+        ]
+        if len(candidates) == 1:
+            return candidates[0]
+
+        # 3. Substring match — "edit-flow" matches "edit-flow-e2"
+        candidates = [
+            d for d in self.doc_root.iterdir()
+            if d.is_dir() and not d.name.startswith("_")
+            and task_id.lower() in d.name.lower()
+        ]
+        if len(candidates) == 1:
+            return candidates[0]
+
+        return None
 
     # ── Tools ──────────────────────────────────────────
 
@@ -353,6 +386,7 @@ class TaskManager:
                 message=f"Task '{task_id}' not found.",
                 error_code=ErrorCode.TASK_NOT_FOUND,
             )
+        resolved_name = folder.name
         idx_path = folder / "index.md"
         if not idx_path.exists():
             files = [
@@ -362,8 +396,8 @@ class TaskManager:
             ]
             return ToolResponse(
                 success=True,
-                message=f"Warning: index.md missing in '{task_id}'. Listing files.",
-                data={"folder": task_id, "files": files},
+                message=f"Warning: index.md missing in '{resolved_name}'. Listing files.",
+                data={"folder": resolved_name, "files": files},
                 error_code=ErrorCode.INDEX_CORRUPT,
             )
         try:
@@ -376,8 +410,8 @@ class TaskManager:
             ]
             return ToolResponse(
                 success=True,
-                message=f"Warning: index.md corrupt in '{task_id}'. Listing files.",
-                data={"folder": task_id, "files": files},
+                message=f"Warning: index.md corrupt in '{resolved_name}'. Listing files.",
+                data={"folder": resolved_name, "files": files},
                 error_code=ErrorCode.INDEX_CORRUPT,
             )
         files = [
@@ -386,7 +420,7 @@ class TaskManager:
             if p.is_file()
         ]
         ctx = TaskContext(
-            folder_name=task_id,
+            folder_name=resolved_name,
             metadata=meta,
             notes=notes,
             context_entries=ctx_entries,
@@ -394,7 +428,7 @@ class TaskManager:
         )
         return ToolResponse(
             success=True,
-            message=f"Context loaded for '{task_id}'.",
+            message=f"Context loaded for '{resolved_name}'.",
             data=ctx.model_dump(),
         )
 
