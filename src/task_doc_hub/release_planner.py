@@ -110,10 +110,10 @@ def create_roboplan_sheet(
         )
 
     # Build HTML with two tables — Google Sheets converts each <table> reasonably
-    html = _build_roboplan_html(name, [], [])
+    csv_content = _build_roboplan_csv([])
 
     try:
-        sheet_id, sheet_url = _upload_as_sheet(token, name, html)
+        sheet_id, sheet_url = _upload_as_sheet(token, name, csv_content)
     except RuntimeError as e:
         return ToolResponse(
             success=False, message=str(e), error_code=ErrorCode.SHEET_ERROR,
@@ -187,10 +187,10 @@ def add_item_to_roboplan(
     state["items"].append(item)
 
     # Rebuild the full sheet HTML and re-upload
-    html = _build_roboplan_html(state["name"], state["items"], ROBOPLAN_QUESTIONS)
+    csv_content = _build_roboplan_csv(state["items"])
 
     try:
-        _update_sheet(token, state["sheet_id"], html)
+        _update_sheet(token, state["sheet_id"], csv_content)
     except RuntimeError as e:
         return ToolResponse(
             success=False, message=str(e), error_code=ErrorCode.SHEET_ERROR,
@@ -253,81 +253,74 @@ def get_release_status(doc_root: Path) -> ToolResponse:
 
 # ── HTML builders ─────────────────────────────────────
 
-def _build_roboplan_html(
-    title: str, items: list[dict], questions: list[str]
-) -> str:
-    """Build an HTML document that Google Drive converts to a multi-table sheet."""
-    rows_html = ""
+def _build_roboplan_csv(items: list[dict]) -> str:
+    """Build CSV content for the roboplan tracking table + release details."""
+    import csv
+    output = io.StringIO()
+    writer = csv.writer(output)
+
+    # Header
+    writer.writerow(ROBOPLAN_COLUMNS)
+
+    # Tracking rows
     for i, item in enumerate(items, 1):
-        gl = ", ".join(item.get("gitlab_links", []))
-        rows_html += (
-            f"<tr>"
-            f"<td>{i}</td>"
-            f"<td>{_esc(item.get('jira_key', ''))}</td>"
-            f"<td>{_esc(item.get('description', ''))}</td>"
-            f"<td></td>"  # Owner
-            f"<td>{_esc(item.get('status', ''))}</td>"
-            f"<td></td><td></td>"  # Start/End date
-            f"<td>{_esc(item.get('has_fe', ''))}</td>"
-            f"<td>{_esc(item.get('has_be', ''))}</td>"
-            f"<td>{_esc(gl)}</td>"
-            f"<td></td>"  # Deployment Notes
-            f"</tr>\n"
-        )
+        gl = " | ".join(item.get("gitlab_links", []))
+        writer.writerow([
+            i,
+            item.get("jira_key", ""),
+            item.get("description", ""),
+            "",  # Owner
+            item.get("status", ""),
+            "",  # Start Date
+            "",  # End Date
+            item.get("has_fe", ""),
+            item.get("has_be", ""),
+            gl,
+            "",  # Deployment Notes
+        ])
 
-    header_cells = "".join(f"<th>{_esc(c)}</th>" for c in ROBOPLAN_COLUMNS)
+    # Blank separator rows
+    writer.writerow([])
+    writer.writerow(["RELEASE DETAILS"])
+    writer.writerow([])
 
-    # Build questions section
-    questions_html = ""
+    # Release detail questions per item
     for item in items:
         jira_key = item.get("jira_key", "")
         desc = item.get("description", "")
         context = item.get("context", [])
-        notes = item.get("notes", [])
         links = item.get("links", [])
 
         ctx_summary = " | ".join(
             f"[{c.get('label', '')}] {c.get('content', '')}" for c in context
         )
-        jira_links = [l for l in links if "jira" in l.lower() or "atlassian" in l.lower()]
         gitlab_links = [l for l in links if "gitlab" in l.lower()]
 
         answers = [
             f"[{jira_key}] {desc}",
             ctx_summary or "—",
-            "See tracking table",
+            "See tracking table above",
             "—",
-            f"JIRA: {jira_key} {' '.join(jira_links)} | GitLab: {' '.join(gitlab_links)}",
+            f"JIRA: {jira_key} | GitLab: {' '.join(gitlab_links)}",
         ]
 
-        questions_html += f"<h3>{jira_key}</h3>\n"
+        writer.writerow([f"--- {jira_key} ---"])
         for q, a in zip(ROBOPLAN_QUESTIONS, answers):
-            questions_html += f"<p><b>{_esc(q)}</b></p>\n<p>{_esc(a)}</p>\n"
-        questions_html += "<hr/>\n"
+            writer.writerow([f"Q: {q}"])
+            writer.writerow([f"A: {a}"])
+        writer.writerow([])
 
-    return f"""<html><body>
-<h1>{_esc(title)} — Tracking</h1>
-<table border="1">
-<tr>{header_cells}</tr>
-{rows_html}
-</table>
-<br/><br/>
-<h1>Release Details</h1>
-{questions_html if questions_html else "<p><i>No items yet.</i></p>"}
-</body></html>"""
-
-
-def _esc(text: str) -> str:
-    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return output.getvalue()
 
 
 # ── Drive API calls ──────────────────────────────────
 
-def _upload_as_sheet(token: str, name: str, html: str) -> tuple[str, str]:
-    """Upload HTML content as a new Google Sheet. Returns (file_id, web_url)."""
+def _upload_as_sheet(token: str, name: str, csv_content: str) -> tuple[str, str]:
+    """Upload CSV content as a new Google Sheet. Returns (file_id, web_url)."""
     metadata = json.dumps({
         "name": name,
         "mimeType": "application/vnd.google-apps.spreadsheet",
+        "parents": ["root"],
     })
 
     resp = requests.post(
@@ -335,7 +328,7 @@ def _upload_as_sheet(token: str, name: str, html: str) -> tuple[str, str]:
         headers={"Authorization": f"Bearer {token}"},
         files={
             "metadata": ("metadata", metadata, "application/json"),
-            "file": ("file.html", html.encode("utf-8"), "text/html"),
+            "file": ("file.csv", csv_content.encode("utf-8"), "text/csv"),
         },
         timeout=30,
     )
@@ -349,15 +342,15 @@ def _upload_as_sheet(token: str, name: str, html: str) -> tuple[str, str]:
     return file_id, url
 
 
-def _update_sheet(token: str, file_id: str, html: str) -> None:
-    """Update an existing Google Sheet by re-uploading HTML content."""
+def _update_sheet(token: str, file_id: str, csv_content: str) -> None:
+    """Update an existing Google Sheet by re-uploading CSV content."""
     resp = requests.patch(
         f"{DRIVE_UPLOAD_URL}/{file_id}?uploadType=media",
         headers={
             "Authorization": f"Bearer {token}",
-            "Content-Type": "text/html",
+            "Content-Type": "text/csv",
         },
-        data=html.encode("utf-8"),
+        data=csv_content.encode("utf-8"),
         timeout=30,
     )
     if resp.status_code not in (200, 201):
