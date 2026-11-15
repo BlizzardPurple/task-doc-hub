@@ -105,7 +105,7 @@ def update_metadata(path: Path, **updates: str | list[str] | None) -> TaskMetada
         raise ValueError("Missing closing frontmatter delimiter")
 
     rest = "\n".join(lines[end_idx + 1:])
-    updated = f"{FRONTMATTER_DELIM}\n{new_fm}\n{FRONTMATTER_DELIM}{rest}"
+    updated = f"{FRONTMATTER_DELIM}\n{new_fm}\n{FRONTMATTER_DELIM}\n{rest}"
     path.write_text(updated, encoding="utf-8")
     return metadata
 

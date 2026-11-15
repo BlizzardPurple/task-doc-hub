@@ -4,20 +4,25 @@ from __future__ import annotations
 
 from mcp.server.mcpserver import MCPServer
 
-from task_doc_hub.config import DOC_ROOT
+from task_doc_hub.config import DOC_ROOT, TASK_STATUSES, VERSION
 from task_doc_hub.task_manager import TaskManager
 
 mcp = MCPServer(
     "doc-hub",
+    version=VERSION,
     instructions=(
         "Doc Hub — persistent task documentation manager. "
         "Also known as: doc hub, task doc hub, task docs. "
         "Use these tools when the user wants to create tasks, add notes, "
         "add session context, search past work, list tasks, generate summaries, "
-        "store screenshots, or sync docs to Google Drive."
+        "store screenshots, sync to Drive, manage releases, or update task status. "
+        f"Valid task statuses: {', '.join(TASK_STATUSES)}."
     ),
 )
 manager = TaskManager(DOC_ROOT)
+
+
+# ── Task CRUD ──────────────────────────────────────────
 
 
 @mcp.tool()
@@ -26,11 +31,12 @@ def create_task(
     title_slug: str | None = None,
     description: str | None = None,
     keywords: list[str] | None = None,
+    links: list[str] | None = None,
 ) -> dict:
     """Create a new task folder with a standardized template.
 
     Provide a jira_key (e.g. N1AREF-3027) or a title_slug (e.g. edit-flow-e2).
-    Optionally add a description and keywords for better searchability.
+    Optionally add description, keywords, and links (JIRA URLs, GitLab MRs).
     Creates index.md + designs/, screenshots/, specs/ subfolders.
     """
     return manager.create_task(
@@ -38,6 +44,7 @@ def create_task(
         title_slug=title_slug,
         description=description,
         keywords=keywords,
+        links=links,
     ).model_dump()
 
 
@@ -47,7 +54,7 @@ def get_context(
 ) -> dict:
     """Load task context by ID, or auto-detect from the current git branch.
 
-    If no task_id is given, reads the git branch in cwd and extracts a JIRA key.
+    Supports partial keys: '3027' matches 'N1AREF-3027'.
     Returns metadata, context entries from all sessions, notes, and file listing.
     """
     return manager.get_context(task_id=task_id, cwd=cwd).model_dump()
@@ -61,12 +68,12 @@ def resume(
     return manager.get_context(task_id=task_id, cwd=cwd).model_dump()
 
 
+# ── Notes & Context ───────────────────────────────────
+
+
 @mcp.tool()
 def add_note(task_id: str, content: str) -> dict:
-    """Append a timestamped note to a task's documentation.
-
-    The note is added to the task's index.md with an ISO 8601 timestamp.
-    """
+    """Append a timestamped note to a task's documentation."""
     return manager.add_note(task_id=task_id, content=content).model_dump()
 
 
@@ -74,25 +81,20 @@ def add_note(task_id: str, content: str) -> dict:
 def add_context(task_id: str, label: str, content: str) -> dict:
     """Append session context to a task's shared documentation.
 
-    Use this to share what was done in one Kiro session (e.g. FE work) so that
-    another session (e.g. BE work) can see it. Each context block is labeled
-    (FE, BE, Design, QA, etc.) and timestamped.
-
-    Example: add_context("N1AREF-3027", "FE", "Implemented edit form with
-    React Query caching, added validation for BEID field")
+    Label it by session type: FE, BE, Design, QA, etc.
+    Example: add_context("3027", "FE", "Implemented edit form with React Query")
     """
     return manager.add_context(
         task_id=task_id, label=label, content=content
     ).model_dump()
 
 
+# ── Screenshots & Recordings ─────────────────────────
+
+
 @mcp.tool()
 def add_screenshot(task_id: str, file_path: str) -> dict:
-    """Store a specific screenshot or recording in a task's screenshots/ folder.
-
-    Use this when you have a specific file path. For grabbing recent captures
-    automatically, use save_recent_captures instead.
-    """
+    """Store a specific screenshot or recording in a task's screenshots/ folder."""
     return manager.add_screenshot(task_id=task_id, source_path=file_path).model_dump()
 
 
@@ -105,66 +107,89 @@ def save_recent_captures(
 ) -> dict:
     """Save the latest screenshots and/or screen recordings into a task.
 
-    Grabs the most recent `count` captures from ~/Documents/Screenshots
-    sorted by time (newest first). Includes both screenshots and recordings.
-
-    Args:
-        task_id: The task to save captures into.
-        count: How many captures to grab (default 4).
-        media_type: "all" (screenshots + recordings), "image" only, or "video" only.
-        force: Skip time gap detection and save immediately.
-
-    Time gap detection: If any two consecutive captures are >= 30 minutes apart,
-    returns the full listing with timestamps and gap details instead of saving.
-    This lets you review and confirm which ones belong to your current session.
-    Call again with force=True to save anyway.
-
-    Examples:
-        "save last 4 screenshots for N1AREF-3027"
-        "save last 3 screenshots and 1 recording for 3027"
-        "grab the latest screen recording for edit-flow-e2"
+    Grabs from ~/Documents/Screenshots. Time gap detection warns if captures
+    are > 30 min apart. Use force=True to skip the check.
+    media_type: "all", "image", or "video".
     """
     return manager.save_recent_captures(
         task_id=task_id, count=count, media_type=media_type, force=force
     ).model_dump()
 
 
+# ── Search & List ─────────────────────────────────────
+
+
 @mcp.tool()
 def search_tasks(query: str) -> dict:
     """Search across all task documentation using word-tokenized matching.
 
-    You don't need to remember exact JIRA keys. Describe what you're looking for
-    in plain words — e.g. "BEID API external users" or "edit flow caching".
-    Searches across titles, descriptions, keywords, context, and notes.
-    Results are ranked by relevance (how many query words match).
+    Describe what you're looking for in plain words. Supports partial keys.
+    Results ranked by relevance.
     """
     return manager.search_tasks(query=query).model_dump()
 
 
 @mcp.tool()
 def list_tasks() -> dict:
-    """List all tracked tasks with their title, description, and status."""
+    """List all tracked tasks with title, description, and status."""
     return manager.list_tasks().model_dump()
+
+
+# ── Status Management ─────────────────────────────────
+
+
+@mcp.tool()
+def update_status(task_id: str, status: str) -> dict:
+    """Update a task's status.
+
+    Valid statuses: planning, blocked, in_progress, final_touches,
+    release_queue, released.
+    """
+    return manager.update_status(task_id=task_id, status=status).model_dump()
+
+
+# ── Release Planner ───────────────────────────────────
+
+
+@mcp.tool()
+def add_to_release_queue(task_id: str) -> dict:
+    """Move a task to release_queue and add it to the active roboplan Google Sheet.
+
+    Auto-populates the sheet from the task's doc hub data: description,
+    JIRA key, context entries, GitLab links, and inferred FE/BE flags.
+    Creates a new roboplan sheet if none exists (named 'Roboplan <Month> <A/B>').
+    """
+    return manager.add_to_release_queue(task_id=task_id).model_dump()
+
+
+@mcp.tool()
+def finalize_release() -> dict:
+    """Mark the current release as done.
+
+    Archives the active roboplan sheet, marks all release_queue tasks as
+    'released', and creates a fresh roboplan for the next release cycle.
+    """
+    return manager.finalize_release().model_dump()
+
+
+@mcp.tool()
+def release_status() -> dict:
+    """Get info about the current active release — name, sheet URL, items."""
+    return manager.release_status().model_dump()
+
+
+# ── Sync & Summary ────────────────────────────────────
 
 
 @mcp.tool()
 def sync_to_drive(task_id: str | None = None) -> dict:
-    """Sync task documentation to Google Drive.
-
-    Syncs a single task (by task_id) or all tasks if task_id is omitted.
-    Requires _drive_credentials.json in the doc root.
-    """
+    """Sync task documentation to Google Drive."""
     return manager.sync_to_drive(task_id=task_id).model_dump()
 
 
 @mcp.tool()
 def summarize(output_path: str | None = None) -> dict:
-    """Generate a SUMMARY.md with all tasks rolled up into one shareable file.
-
-    Creates a comprehensive summary at the doc root (or a custom output_path)
-    with status overview, task index table, file inventories, and recent notes.
-    Great for sharing in Slack, Drive, or a wiki.
-    """
+    """Generate a SUMMARY.md with all tasks rolled up into one shareable file."""
     return manager.summarize(output_path=output_path).model_dump()
 
 

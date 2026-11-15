@@ -6,8 +6,8 @@ import logging
 import re
 from pathlib import Path
 
-from task_doc_hub import drive_sync, git_detector, index_file, screenshot, summarizer
-from task_doc_hub.config import SUBFOLDERS, TITLE_SLUG_PATTERN, ErrorCode
+from task_doc_hub import drive_sync, git_detector, index_file, release_planner, screenshot, summarizer
+from task_doc_hub.config import SUBFOLDERS, TASK_STATUSES, TITLE_SLUG_PATTERN, ErrorCode
 from task_doc_hub.models import (
     SearchHit,
     TaskContext,
@@ -78,6 +78,7 @@ class TaskManager:
         title_slug: str | None = None,
         description: str | None = None,
         keywords: list[str] | None = None,
+        links: list[str] | None = None,
     ) -> ToolResponse:
         folder_name = self._derive_folder_name(jira_key, title_slug)
         if folder_name is None:
@@ -98,11 +99,16 @@ class TaskManager:
             sub_path = folder / sub
             sub_path.mkdir()
             (sub_path / ".gitkeep").touch()
+        # Auto-generate links if JIRA key provided
+        auto_links = list(links or [])
+        if jira_key and not any("atlassian" in l or "jira" in l for l in auto_links):
+            auto_links.insert(0, f"https://jira.corp.nielsen.com/browse/{jira_key}")
         metadata = TaskMetadata(
             jira_key=jira_key,
             title=title_slug or jira_key,
             description=description,
             keywords=keywords or [],
+            links=auto_links,
         )
         index_file.create_index(folder / "index.md", metadata)
         return ToolResponse(
@@ -365,6 +371,107 @@ class TaskManager:
         """Generate a SUMMARY.md with all task data rolled up."""
         dest = Path(output_path) if output_path else None
         return summarizer.generate_summary(self.doc_root, output_path=dest)
+
+
+    def update_status(self, task_id: str, status: str) -> ToolResponse:
+        """Update a task's status in its index.md frontmatter."""
+        if status not in TASK_STATUSES:
+            return ToolResponse(
+                success=False,
+                message=f"Invalid status '{status}'. Valid: {', '.join(TASK_STATUSES)}",
+                error_code=ErrorCode.INVALID_STATUS,
+            )
+        folder = self._resolve_task_folder(task_id)
+        if not folder:
+            return ToolResponse(
+                success=False,
+                message=f"Task '{task_id}' not found.",
+                error_code=ErrorCode.TASK_NOT_FOUND,
+            )
+        resolved_name = folder.name
+        idx_path = folder / "index.md"
+        try:
+            meta = index_file.update_metadata(idx_path, status=status)
+        except (ValueError, OSError) as e:
+            return ToolResponse(
+                success=False,
+                message=f"Failed to update status: {e}",
+                error_code=ErrorCode.INDEX_CORRUPT,
+            )
+        return ToolResponse(
+            success=True,
+            message=f"Task '{resolved_name}' status updated to '{status}'.",
+            data={"task_id": resolved_name, "status": status},
+        )
+
+    def add_to_release_queue(self, task_id: str) -> ToolResponse:
+        """Move a task to release_queue status and add it to the active roboplan sheet."""
+        folder = self._resolve_task_folder(task_id)
+        if not folder:
+            return ToolResponse(
+                success=False,
+                message=f"Task '{task_id}' not found.",
+                error_code=ErrorCode.TASK_NOT_FOUND,
+            )
+        resolved_name = folder.name
+        idx_path = folder / "index.md"
+
+        # Load task data for auto-populating the sheet
+        try:
+            meta, ctx_entries, notes = index_file.read_index(idx_path)
+        except ValueError:
+            return ToolResponse(
+                success=False,
+                message=f"Cannot read index.md for '{resolved_name}'.",
+                error_code=ErrorCode.INDEX_CORRUPT,
+            )
+
+        # Update status to release_queue
+        index_file.update_metadata(idx_path, status="release_queue")
+
+        # Ensure active release exists
+        state = release_planner.load_release_state(self.doc_root)
+        if not state:
+            create_result = release_planner.create_roboplan_sheet(self.doc_root)
+            if not create_result.success:
+                return create_result
+
+        # Build task data dict for the sheet
+        task_data = {
+            "jira_key": meta.jira_key,
+            "title": meta.title,
+            "description": meta.description,
+            "status": "release_queue",
+            "links": meta.links,
+            "keywords": meta.keywords,
+            "context": [c.model_dump() for c in ctx_entries],
+            "notes": [n.model_dump() for n in notes],
+        }
+
+        result = release_planner.add_item_to_roboplan(
+            self.doc_root, resolved_name, task_data
+        )
+        return result
+
+    def finalize_release(self) -> ToolResponse:
+        """Mark current release as done, archive the sheet, create a new one."""
+        # Update all release_queue tasks to released
+        state = release_planner.load_release_state(self.doc_root)
+        if state:
+            for item in state.get("items", []):
+                tid = item.get("task_id")
+                folder = self._resolve_task_folder(tid)
+                if folder:
+                    idx_path = folder / "index.md"
+                    try:
+                        index_file.update_metadata(idx_path, status="released")
+                    except (ValueError, OSError):
+                        pass
+        return release_planner.finalize_release(self.doc_root)
+
+    def release_status(self) -> ToolResponse:
+        """Get info about the current active release."""
+        return release_planner.get_release_status(self.doc_root)
 
     # ── Helpers ────────────────────────────────────────
 
