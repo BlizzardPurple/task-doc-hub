@@ -1,36 +1,40 @@
-"""Release planner — manage release queues and roboplan Google Sheets."""
+"""Release planner — manage release queues and roboplan Google Sheets.
+
+Uses the Drive API via clasp OAuth token (no Sheets API scope needed).
+Creates spreadsheets by uploading HTML content that Google converts to Sheets.
+"""
 
 from __future__ import annotations
 
+import io
 import json
 import logging
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+
+import requests
 
 from task_doc_hub.config import (
     DOC_ROOT,
-    GOOGLE_SCOPES,
     ROBOPLAN_COLUMNS,
     ROBOPLAN_QUESTIONS,
     ErrorCode,
 )
+from task_doc_hub.google_auth import drive_headers, get_access_token
 from task_doc_hub.models import ToolResponse
 
 logger = logging.getLogger(__name__)
 
 RELEASE_STATE_FILE = "_active_release.json"
+DRIVE_UPLOAD_URL = "https://www.googleapis.com/upload/drive/v3/files"
+DRIVE_FILES_URL = "https://www.googleapis.com/drive/v3/files"
 
 
 # ── Release naming ────────────────────────────────────
 
 def current_release_name() -> str:
-    """Generate release name: 'Roboplan <Month> <A|B>'.
-
-    Tries JIRA CLI for active sprint name first.
-    Falls back to month + half logic.
-    """
+    """Generate release name: 'Roboplan <Month> <A|B>' or from JIRA sprint."""
     sprint = _get_jira_sprint_name()
     if sprint:
         return f"Roboplan {sprint}"
@@ -41,14 +45,12 @@ def current_release_name() -> str:
 
 
 def _get_jira_sprint_name() -> str | None:
-    """Try to get the active sprint name from JIRA CLI."""
     try:
         result = subprocess.run(
             ["jira", "sprint", "list", "--state", "active", "--plain", "--no-headers"],
             capture_output=True, text=True, timeout=10,
         )
         if result.returncode == 0 and result.stdout.strip():
-            # Parse: ID  NAME  START  END  STATUS
             line = result.stdout.strip().split("\n")[0]
             parts = line.split("\t")
             if len(parts) >= 2:
@@ -65,7 +67,6 @@ def _state_path(doc_root: Path) -> Path:
 
 
 def load_release_state(doc_root: Path) -> dict | None:
-    """Load the active release state, or None if no active release."""
     p = _state_path(doc_root)
     if not p.exists():
         return None
@@ -82,7 +83,6 @@ def save_release_state(doc_root: Path, state: dict) -> None:
 
 
 def archive_release_state(doc_root: Path) -> None:
-    """Move active release state to archive."""
     p = _state_path(doc_root)
     if p.exists():
         state = load_release_state(doc_root)
@@ -93,118 +93,46 @@ def archive_release_state(doc_root: Path) -> None:
         p.unlink()
 
 
-# ── Google Sheets integration ─────────────────────────
-
-def _get_sheets_service(doc_root: Path):
-    """Authenticate and return a Sheets API v4 service object."""
-    from google.auth.transport.requests import Request
-    from google.oauth2.credentials import Credentials
-    from google_auth_oauthlib.flow import InstalledAppFlow
-    from googleapiclient.discovery import build
-
-    token_path = doc_root / "_drive_token.json"
-    creds_path = doc_root / "_drive_credentials.json"
-    creds = None
-
-    if token_path.exists():
-        creds = Credentials.from_authorized_user_file(str(token_path), GOOGLE_SCOPES)
-
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            if not creds_path.exists():
-                raise FileNotFoundError(
-                    f"Place your OAuth credentials at {creds_path}"
-                )
-            flow = InstalledAppFlow.from_client_secrets_file(
-                str(creds_path), GOOGLE_SCOPES
-            )
-            creds = flow.run_local_server(port=0)
-        token_path.write_text(creds.to_json())
-
-    return build("sheets", "v4", credentials=creds)
-
+# ── Google Sheets via Drive API ───────────────────────
 
 def create_roboplan_sheet(
     doc_root: Path,
     release_name: str | None = None,
 ) -> ToolResponse:
-    """Create a new roboplan Google Sheet with two tabs."""
+    """Create a new roboplan Google Sheet via Drive API + HTML upload."""
     name = release_name or current_release_name()
 
     try:
-        service = _get_sheets_service(doc_root)
-    except Exception as e:
+        token = get_access_token()
+    except RuntimeError as e:
         return ToolResponse(
-            success=False,
-            message=f"Google Sheets auth failed: {e}",
-            error_code=ErrorCode.SHEET_ERROR,
+            success=False, message=str(e), error_code=ErrorCode.SHEET_ERROR,
         )
+
+    # Build HTML with two tables — Google Sheets converts each <table> reasonably
+    html = _build_roboplan_html(name, [], [])
 
     try:
-        spreadsheet = service.spreadsheets().create(
-            body={
-                "properties": {"title": name},
-                "sheets": [
-                    {"properties": {"title": "Tracking", "index": 0}},
-                    {"properties": {"title": "Release Details", "index": 1}},
-                ],
-            }
-        ).execute()
-
-        sheet_id = spreadsheet["spreadsheetId"]
-        sheet_url = spreadsheet["spreadsheetUrl"]
-
-        # Set up Sheet 1 headers
-        service.spreadsheets().values().update(
-            spreadsheetId=sheet_id,
-            range="Tracking!A1",
-            valueInputOption="RAW",
-            body={"values": [ROBOPLAN_COLUMNS]},
-        ).execute()
-
-        # Set up Sheet 2 with question labels
-        questions_data = []
-        for q in ROBOPLAN_QUESTIONS:
-            questions_data.append([q])
-            questions_data.append([""])  # empty row for answer
-            questions_data.append([""])  # spacer
-
-        service.spreadsheets().values().update(
-            spreadsheetId=sheet_id,
-            range="'Release Details'!A1",
-            valueInputOption="RAW",
-            body={"values": questions_data},
-        ).execute()
-
-        # Bold the header row and question labels
-        tracking_sheet_id = spreadsheet["sheets"][0]["properties"]["sheetId"]
-        details_sheet_id = spreadsheet["sheets"][1]["properties"]["sheetId"]
-        _format_headers(service, sheet_id, tracking_sheet_id, details_sheet_id)
-
-        # Save release state
-        state = {
-            "name": name,
-            "sheet_id": sheet_id,
-            "sheet_url": sheet_url,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "items": [],
-        }
-        save_release_state(doc_root, state)
-
+        sheet_id, sheet_url = _upload_as_sheet(token, name, html)
+    except RuntimeError as e:
         return ToolResponse(
-            success=True,
-            message=f"Roboplan '{name}' created.",
-            data={"sheet_id": sheet_id, "sheet_url": sheet_url, "name": name},
+            success=False, message=str(e), error_code=ErrorCode.SHEET_ERROR,
         )
 
-    except Exception as e:
-        return ToolResponse(
-            success=False,
-            message=f"Failed to create sheet: {e}",
-            error_code=ErrorCode.SHEET_ERROR,
-        )
+    state = {
+        "name": name,
+        "sheet_id": sheet_id,
+        "sheet_url": sheet_url,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "items": [],
+    }
+    save_release_state(doc_root, state)
+
+    return ToolResponse(
+        success=True,
+        message=f"Roboplan '{name}' created.",
+        data={"sheet_id": sheet_id, "sheet_url": sheet_url, "name": name},
+    )
 
 
 def add_item_to_roboplan(
@@ -212,101 +140,76 @@ def add_item_to_roboplan(
     task_id: str,
     task_data: dict,
 ) -> ToolResponse:
-    """Add a task entry to the active roboplan sheet.
-
-    task_data is expected to contain fields from the doc hub task's index.md.
-    """
+    """Add a task to the active roboplan — rebuilds and re-uploads the sheet."""
     state = load_release_state(doc_root)
     if not state:
         return ToolResponse(
             success=False,
-            message="No active release. Create one first with create_roboplan.",
+            message="No active release. Create one first.",
             error_code=ErrorCode.RELEASE_NOT_FOUND,
         )
 
     try:
-        service = _get_sheets_service(doc_root)
-    except Exception as e:
+        token = get_access_token()
+    except RuntimeError as e:
         return ToolResponse(
-            success=False,
-            message=f"Google Sheets auth failed: {e}",
-            error_code=ErrorCode.SHEET_ERROR,
+            success=False, message=str(e), error_code=ErrorCode.SHEET_ERROR,
         )
 
-    sheet_id = state["sheet_id"]
-    row_num = len(state["items"]) + 1
-
-    # Build the row from task data
+    # Build item from task data
     jira_key = task_data.get("jira_key", task_id)
     description = task_data.get("description") or task_data.get("title", "")
-    owner = task_data.get("owner", "")
-    status = task_data.get("status", "release_queue")
+    keywords = task_data.get("keywords", [])
+    context_entries = task_data.get("context", [])
+    notes = task_data.get("notes", [])
     links = task_data.get("links", [])
     gitlab_links = [l for l in links if "gitlab" in l.lower()]
 
-    # Detect has_fe / has_be from context or keywords
-    keywords = task_data.get("keywords", [])
-    context_text = " ".join(
-        c.get("content", "") for c in task_data.get("context", [])
-    ).lower()
+    context_text = " ".join(c.get("content", "") for c in context_entries).lower()
     all_text = (description + " " + " ".join(keywords) + " " + context_text).lower()
     has_fe = "Yes" if any(w in all_text for w in ["fe", "frontend", "enablement-ui", "react"]) else ""
     has_be = "Yes" if any(w in all_text for w in ["be", "backend", "n1-ads-api", "api", "endpoint"]) else ""
 
-    row = [
-        row_num,                                        # #
-        jira_key,                                       # JIRA Key
-        description,                                    # Issue Description
-        owner,                                          # Owner
-        status,                                         # Status
-        "",                                             # Start Date
-        "",                                             # End Date
-        has_fe,                                         # Has FE
-        has_be,                                         # Has BE
-        ", ".join(gitlab_links) if gitlab_links else "", # GitLab MR
-        "",                                             # Deployment Notes
-    ]
+    item = {
+        "task_id": task_id,
+        "jira_key": jira_key,
+        "description": description,
+        "status": "release_queue",
+        "has_fe": has_fe,
+        "has_be": has_be,
+        "gitlab_links": gitlab_links,
+        "context": context_entries,
+        "notes": notes,
+        "links": links,
+        "keywords": keywords,
+        "added_at": datetime.now(timezone.utc).isoformat(),
+    }
+    state["items"].append(item)
+
+    # Rebuild the full sheet HTML and re-upload
+    html = _build_roboplan_html(state["name"], state["items"], ROBOPLAN_QUESTIONS)
 
     try:
-        service.spreadsheets().values().append(
-            spreadsheetId=sheet_id,
-            range="Tracking!A2",
-            valueInputOption="RAW",
-            insertDataOption="INSERT_ROWS",
-            body={"values": [row]},
-        ).execute()
+        _update_sheet(token, state["sheet_id"], html)
+    except RuntimeError as e:
+        return ToolResponse(
+            success=False, message=str(e), error_code=ErrorCode.SHEET_ERROR,
+        )
 
-        # Also update Sheet 2 with task details
-        _append_release_details(service, sheet_id, task_data, jira_key)
+    save_release_state(doc_root, state)
 
-        # Track in state
-        state["items"].append({
-            "task_id": task_id,
+    return ToolResponse(
+        success=True,
+        message=f"Added '{jira_key}' to roboplan '{state['name']}'.",
+        data={
+            "sheet_url": state["sheet_url"],
             "jira_key": jira_key,
-            "added_at": datetime.now(timezone.utc).isoformat(),
-        })
-        save_release_state(doc_root, state)
-
-        return ToolResponse(
-            success=True,
-            message=f"Added '{jira_key}' to roboplan '{state['name']}'.",
-            data={
-                "sheet_url": state["sheet_url"],
-                "row": row_num,
-                "jira_key": jira_key,
-            },
-        )
-
-    except Exception as e:
-        return ToolResponse(
-            success=False,
-            message=f"Failed to add item: {e}",
-            error_code=ErrorCode.SHEET_ERROR,
-        )
+            "items_count": len(state["items"]),
+        },
+    )
 
 
 def finalize_release(doc_root: Path) -> ToolResponse:
-    """Mark the current release as done. Archives state, creates a new roboplan."""
     state = load_release_state(doc_root)
     if not state:
         return ToolResponse(
@@ -314,14 +217,10 @@ def finalize_release(doc_root: Path) -> ToolResponse:
             message="No active release to finalize.",
             error_code=ErrorCode.RELEASE_NOT_FOUND,
         )
-
     old_name = state["name"]
     old_url = state["sheet_url"]
     archive_release_state(doc_root)
-
-    # Create the next roboplan
     result = create_roboplan_sheet(doc_root)
-
     return ToolResponse(
         success=True,
         message=f"Release '{old_name}' finalized. New roboplan created.",
@@ -334,13 +233,10 @@ def finalize_release(doc_root: Path) -> ToolResponse:
 
 
 def get_release_status(doc_root: Path) -> ToolResponse:
-    """Get the current active release info."""
     state = load_release_state(doc_root)
     if not state:
         return ToolResponse(
-            success=True,
-            message="No active release.",
-            data={"active": False},
+            success=True, message="No active release.", data={"active": False},
         )
     return ToolResponse(
         success=True,
@@ -355,106 +251,114 @@ def get_release_status(doc_root: Path) -> ToolResponse:
     )
 
 
-# ── Helpers ───────────────────────────────────────────
+# ── HTML builders ─────────────────────────────────────
 
-def _append_release_details(
-    service: Any, sheet_id: str, task_data: dict, jira_key: str
-) -> None:
-    """Append the 5 questions + answers for this task to Sheet 2."""
-    description = task_data.get("description") or task_data.get("title", "")
-    context_entries = task_data.get("context", [])
-    notes = task_data.get("notes", [])
-    links = task_data.get("links", [])
-    keywords = task_data.get("keywords", [])
+def _build_roboplan_html(
+    title: str, items: list[dict], questions: list[str]
+) -> str:
+    """Build an HTML document that Google Drive converts to a multi-table sheet."""
+    rows_html = ""
+    for i, item in enumerate(items, 1):
+        gl = ", ".join(item.get("gitlab_links", []))
+        rows_html += (
+            f"<tr>"
+            f"<td>{i}</td>"
+            f"<td>{_esc(item.get('jira_key', ''))}</td>"
+            f"<td>{_esc(item.get('description', ''))}</td>"
+            f"<td></td>"  # Owner
+            f"<td>{_esc(item.get('status', ''))}</td>"
+            f"<td></td><td></td>"  # Start/End date
+            f"<td>{_esc(item.get('has_fe', ''))}</td>"
+            f"<td>{_esc(item.get('has_be', ''))}</td>"
+            f"<td>{_esc(gl)}</td>"
+            f"<td></td>"  # Deployment Notes
+            f"</tr>\n"
+        )
 
-    # Build context summary from all session context entries
-    context_summary = ""
-    for c in context_entries:
-        label = c.get("label", "")
-        content = c.get("content", "")
-        context_summary += f"[{label}] {content}\n"
+    header_cells = "".join(f"<th>{_esc(c)}</th>" for c in ROBOPLAN_COLUMNS)
 
-    # Build notes summary (last 3)
-    notes_summary = ""
-    for n in notes[-3:]:
-        notes_summary += f"- {n.get('content', '')}\n"
+    # Build questions section
+    questions_html = ""
+    for item in items:
+        jira_key = item.get("jira_key", "")
+        desc = item.get("description", "")
+        context = item.get("context", [])
+        notes = item.get("notes", [])
+        links = item.get("links", [])
 
-    # Infer impacted systems from keywords/context
-    all_text = (description + " " + " ".join(keywords) + " " + context_summary).lower()
-    systems = []
-    if any(w in all_text for w in ["enablement-ui", "fe", "frontend", "react"]):
-        systems.append("enablement-ui (FE)")
-    if any(w in all_text for w in ["n1-ads-api", "be", "backend", "api"]):
-        systems.append("n1-ads-api (BE)")
-    if any(w in all_text for w in ["manifest", "n1adsref"]):
-        systems.append("n1adsref (Manifest)")
+        ctx_summary = " | ".join(
+            f"[{c.get('label', '')}] {c.get('content', '')}" for c in context
+        )
+        jira_links = [l for l in links if "jira" in l.lower() or "atlassian" in l.lower()]
+        gitlab_links = [l for l in links if "gitlab" in l.lower()]
 
-    jira_links = [l for l in links if "jira" in l.lower() or "atlassian" in l.lower()]
-    gitlab_links = [l for l in links if "gitlab" in l.lower()]
-    if jira_key:
-        jira_links.insert(0, jira_key)
+        answers = [
+            f"[{jira_key}] {desc}",
+            ctx_summary or "—",
+            "See tracking table",
+            "—",
+            f"JIRA: {jira_key} {' '.join(jira_links)} | GitLab: {' '.join(gitlab_links)}",
+        ]
 
-    answers = [
-        f"[{jira_key}] {description}",                              # What
-        context_summary.strip() or notes_summary.strip() or "—",    # Why
-        ", ".join(systems) if systems else "—",                      # Systems
-        "—",                                                         # Expected outcome (user fills)
-        f"JIRA: {', '.join(jira_links)}\nGitLab: {', '.join(gitlab_links)}",  # Links
-    ]
+        questions_html += f"<h3>{jira_key}</h3>\n"
+        for q, a in zip(ROBOPLAN_QUESTIONS, answers):
+            questions_html += f"<p><b>{_esc(q)}</b></p>\n<p>{_esc(a)}</p>\n"
+        questions_html += "<hr/>\n"
 
-    rows: list[list[str]] = []
-    rows.append([f"--- {jira_key} ---"])
-    rows.append([""])
-    for q, a in zip(ROBOPLAN_QUESTIONS, answers):
-        rows.append([f"Q: {q}"])
-        rows.append([f"A: {a}"])
-        rows.append([""])
-    rows.append([""])
-
-    service.spreadsheets().values().append(
-        spreadsheetId=sheet_id,
-        range="'Release Details'!A1",
-        valueInputOption="RAW",
-        insertDataOption="INSERT_ROWS",
-        body={"values": rows},
-    ).execute()
+    return f"""<html><body>
+<h1>{_esc(title)} — Tracking</h1>
+<table border="1">
+<tr>{header_cells}</tr>
+{rows_html}
+</table>
+<br/><br/>
+<h1>Release Details</h1>
+{questions_html if questions_html else "<p><i>No items yet.</i></p>"}
+</body></html>"""
 
 
-def _format_headers(
-    service: Any, sheet_id: str, tracking_id: int, details_id: int
-) -> None:
-    """Bold the header row on both sheets."""
-    requests = [
-        {
-            "repeatCell": {
-                "range": {
-                    "sheetId": tracking_id,
-                    "startRowIndex": 0,
-                    "endRowIndex": 1,
-                },
-                "cell": {
-                    "userEnteredFormat": {
-                        "textFormat": {"bold": True},
-                        "backgroundColor": {"red": 0.9, "green": 0.9, "blue": 0.9},
-                    }
-                },
-                "fields": "userEnteredFormat(textFormat,backgroundColor)",
-            }
+def _esc(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+# ── Drive API calls ──────────────────────────────────
+
+def _upload_as_sheet(token: str, name: str, html: str) -> tuple[str, str]:
+    """Upload HTML content as a new Google Sheet. Returns (file_id, web_url)."""
+    metadata = json.dumps({
+        "name": name,
+        "mimeType": "application/vnd.google-apps.spreadsheet",
+    })
+
+    resp = requests.post(
+        f"{DRIVE_UPLOAD_URL}?uploadType=multipart",
+        headers={"Authorization": f"Bearer {token}"},
+        files={
+            "metadata": ("metadata", metadata, "application/json"),
+            "file": ("file.html", html.encode("utf-8"), "text/html"),
         },
-        {
-            "updateSheetProperties": {
-                "properties": {
-                    "sheetId": tracking_id,
-                    "gridProperties": {"frozenRowCount": 1},
-                },
-                "fields": "gridProperties.frozenRowCount",
-            }
+        timeout=30,
+    )
+
+    if resp.status_code not in (200, 201):
+        raise RuntimeError(f"Drive upload failed ({resp.status_code}): {resp.text[:200]}")
+
+    data = resp.json()
+    file_id = data["id"]
+    url = f"https://docs.google.com/spreadsheets/d/{file_id}/edit"
+    return file_id, url
+
+
+def _update_sheet(token: str, file_id: str, html: str) -> None:
+    """Update an existing Google Sheet by re-uploading HTML content."""
+    resp = requests.patch(
+        f"{DRIVE_UPLOAD_URL}/{file_id}?uploadType=media",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "text/html",
         },
-    ]
-    try:
-        service.spreadsheets().batchUpdate(
-            spreadsheetId=sheet_id,
-            body={"requests": requests},
-        ).execute()
-    except Exception:
-        pass  # formatting is nice-to-have, don't fail on it
+        data=html.encode("utf-8"),
+        timeout=30,
+    )
+    if resp.status_code not in (200, 201):
+        raise RuntimeError(f"Drive update failed ({resp.status_code}): {resp.text[:200]}")
