@@ -178,6 +178,42 @@ def release_status() -> dict:
     return manager.release_status().model_dump()
 
 
+
+# ── Pipeline Watcher ──────────────────────────────────
+
+
+@mcp.tool()
+def watch_pipeline(pipeline_url: str) -> dict:
+    """Start watching a GitLab pipeline. Polls every 60 seconds.
+
+    FE pipelines: auto-retries 01_install_dependencies up to 4x,
+    auto-deploys when all prereqs pass.
+    BE/manifest: watch-only, reports status.
+
+    Paste a full GitLab pipeline URL, e.g.:
+    https://gitlab.com/group/project/-/pipelines/12345
+    """
+    from task_doc_hub import pipeline_watcher
+    return pipeline_watcher.watch_pipeline(pipeline_url).model_dump()
+
+
+@mcp.tool()
+def unwatch_pipeline(watch_id: int) -> dict:
+    """Stop watching a pipeline."""
+    from task_doc_hub import pipeline_watcher
+    return pipeline_watcher.unwatch_pipeline(watch_id).model_dump()
+
+
+@mcp.tool()
+def pipeline_status(watch_id: int | None = None) -> dict:
+    """Get status of watched pipelines.
+
+    Pass a watch_id for a single pipeline, or omit for all.
+    Shows status, jobs, retries, elapsed time.
+    """
+    from task_doc_hub import pipeline_watcher
+    return pipeline_watcher.pipeline_status(watch_id).model_dump()
+
 # ── Sync & Summary ────────────────────────────────────
 
 
